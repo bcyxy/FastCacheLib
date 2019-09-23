@@ -4,18 +4,22 @@
 class MyKey : public FCKeyIf
 {
 public:
-    uint32_t getHashVal() {
-        return 0;
+    uint32_t m_val;
+
+    MyKey(uint32_t val) { m_val = val; }
+    
+    uint32_t getHashVal(const uint32_t &hashSize) const {
+        return m_val % hashSize;
     }
 };
 
 
 int main() {
-    FCache<int> fcObj;
+    FCache<int> fcObj(100, 1000);
     fcObj.init();
     fcObj.start();
 
-    MyKey myKey;
+    MyKey myKey(12);
     FCNode<int> *pNode = NULL;
 
     // 插入

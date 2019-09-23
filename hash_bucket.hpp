@@ -2,6 +2,13 @@
 #define __HASH_BUCKET_H__
 
 
+class FCKeyIf
+{
+public:
+    virtual uint32_t getHashVal(const uint32_t &hashSize) const = 0;
+};
+
+
 template<class FCVal>
 class FCNode
 {
@@ -29,13 +36,31 @@ private:
 };
 
 
+/***/
 template<class FCVal>
 class HashBucket
 {
+public:
+    HashBucket() {}
+    ~HashBucket() {}
+
+    FCNode<FCVal>* insertNode(const FCKeyIf &key);
 private:
     pthread_rwlock_t rw_lock;
     FCNode<FCVal> *m_treeTop;
+
+    FCNode<FCVal> *m_tmpNodePtr;
 };
+
+
+////////////////////////////////////////////////////////////////////////////////
+
+
+template<class FCVal>
+FCNode<FCVal>*
+HashBucket<FCVal>::insertNode(const FCKeyIf &key) {
+    return NULL;
+}
 
 
 #endif

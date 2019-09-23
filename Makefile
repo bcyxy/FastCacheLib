@@ -1,6 +1,6 @@
 
 test_run: example.cpp f_cache.hpp hash_bucket.hpp
-	g++ -o test_run example.cpp
+	g++ -g -o test_run example.cpp
 
 .PHONY: clean
 clean:
