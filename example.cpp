@@ -1,26 +1,46 @@
 #include "f_cache.hpp"
 
 
-class MyKey : public FCKeyIf
+class MyKey
 {
 public:
     uint32_t m_val;
 
-    MyKey(uint32_t val) { m_val = val; }
+    MyKey() { m_val = 12; }
     
     uint32_t getHashVal(const uint32_t &hashSize) const {
         return m_val % hashSize;
+    }
+
+    bool operator < (const MyKey &obj2) const {
+        return m_val < obj2.m_val;
+    }
+
+    bool operator > (const MyKey &obj2) const {
+        return m_val > obj2.m_val;
+    }
+
+    bool operator == (const MyKey &obj2) const {
+        return m_val == obj2.m_val;
+    }
+
+    bool operator <= (const MyKey &obj2) const {
+        return m_val <= obj2.m_val;
+    }
+
+    bool operator >= (const MyKey &obj2) const {
+        return m_val >= obj2.m_val;
     }
 };
 
 
 int main() {
-    FCache<int> fcObj(100, 1000);
+    FCache<MyKey, int> fcObj(100, 1000);
     fcObj.init();
     fcObj.start();
 
-    MyKey myKey(12);
-    FCNode<int> *pNode = NULL;
+    MyKey myKey;
+    FCNode<MyKey, int> *pNode = NULL;
 
     // 插入
     pNode = fcObj.insertNode(myKey);
