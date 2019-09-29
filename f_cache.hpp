@@ -39,13 +39,15 @@ public:
     HashBucket();
     ~HashBucket();
     int init(FCache<FCKey, FCVal> *pBelong);
-    int get(const FCKey &key, FCVal &outVal) {}
-
-    /** 插入值
-     * @return （同FCache::insert）*/
+    /** 同FCache::get */
+    int get(const FCKey &key, FCVal &outVal);
+    /** 同FCache::insert */
     int insert(const FCKey &key, const FCVal &val);
-    int del(const FCKey &key) {}
+    /** 同FCache::del */
+    int del(const FCKey &key);
+    /** 删除老化的节点 */
     int delOld(time_t currTm);
+    uint32_t size() { return m_bucketMap.size(); };
 
 private:
     pthread_mutex_t m_bucketLock;
@@ -69,24 +71,43 @@ public:
 
     FCache(uint32_t hashSize, uint32_t maxNodeCount);
     ~FCache();
-    int init();
+    int init(void (*pOldCallBack)(FCKey key, FCVal val, void *argv),
+             void *oldCallArgv=NULL);
     int start();
-    int stop() {}
-    int get(const FCKey &key, FCVal &outVal) {}
-
+    int stop();
+    /** 获取值
+     * @param outVal
+     *     输出查到的值
+     * @return
+     *     0: 正常获取
+     *     1: 此值不存在 */
+    int get(const FCKey &key, FCVal &outVal);
     /** 插入值
      * @return
      *     0: 正常插入
      *     1: 此值已经存在
      *     2: 节点已经用完 */
     int insert(const FCKey &key, const FCVal &val);
-    int del(const FCKey &key) {}
+    /** 删除值
+     * @return
+     *     0: 正常删除
+     *     1: 此值不存在 */
+    int del(const FCKey &key);
+    /** 获取元素个数 */
+    uint32_t size();
+    /** 设置老化时间，单位：秒 */
+    int setOldTime(uint32_t oldSec) { m_oldSec = oldSec; }
 
 private:
     uint32_t m_hashSize;
     HashBucket<FCKey, FCVal> *m_hashMap;
-    pthread_t m_oldTid;
 
+    ////// 老化 ////////////////////////////////////////////////////////////////
+    pthread_t m_oldTid;
+    void *m_oldCallArgv;
+    uint32_t m_oldSec; /**< 老化的秒数 */
+    /** 老化后的回调函数 */
+    void (*m_pOldCallBack)(FCKey key, FCVal val, void *argv);
     void __oldLoop();
     static void* __threadFunc(void *pObj);
 
@@ -138,7 +159,29 @@ HashBucket<FCKey, FCVal>::~HashBucket() {
 template<class FCKey, class FCVal>
 int
 HashBucket<FCKey, FCVal>::init(FCache<FCKey, FCVal> *pBelong) {
+    m_pBelong = pBelong;
     m_bucketMap.clear();
+}
+
+
+template<class FCKey, class FCVal>
+int
+HashBucket<FCKey, FCVal>::get(const FCKey &key, FCVal &outVal) {
+    int rst = 0;
+    FCNode<FCKey, FCVal> *pNode = NULL;
+    pthread_mutex_lock(&m_bucketLock);
+    BucketMapIt bIt = m_bucketMap.find(key);
+    if (bIt != m_bucketMap.end()) {
+        pNode = bIt->second;
+        outVal = pNode->m_val;
+        __oldLinkDelNode(pNode);
+        __oldLinkAddNode(pNode);
+    }
+    else {
+        rst = 1;
+    }
+    pthread_mutex_unlock(&m_bucketLock);
+    return rst;
 }
 
 
@@ -163,9 +206,31 @@ HashBucket<FCKey, FCVal>::insert(const FCKey &key, const FCVal &val) {
         else {
             pNode->m_key = key;
             pNode->m_val = val;
+            pNode->m_tm = m_pBelong->__getTm();
             pair<BucketMapIt, bool> iRst = m_bucketMap.insert(make_pair(key, pNode));
             __oldLinkAddNode(pNode);
         }
+    }
+    pthread_mutex_unlock(&m_bucketLock);
+    return rst;
+}
+
+
+template<class FCKey, class FCVal>
+int
+HashBucket<FCKey, FCVal>::del(const FCKey &key) {
+    int rst = 0;
+    FCNode<FCKey, FCVal> *pNode = NULL;
+    pthread_mutex_lock(&m_bucketLock);
+    BucketMapIt bIt = m_bucketMap.find(key);
+    if (bIt == m_bucketMap.end()) {
+        rst = 1;
+    }
+    else {
+        pNode = bIt->second;
+        __oldLinkDelNode(pNode);
+        m_bucketMap.erase(bIt);
+        m_pBelong->__returnNode(pNode);
     }
     pthread_mutex_unlock(&m_bucketLock);
     return rst;
@@ -181,8 +246,22 @@ HashBucket<FCKey, FCVal>::delOld(time_t currTm) {
         if (m_oldLinkHead == NULL) {
             break;
         }
-        if (m_oldLinkHead->m_tm - currTm > 5) {
-            // 删除节点
+
+        if (currTm - m_oldLinkHead->m_tm > m_pBelong->m_oldSec) {
+            FCNode<FCKey, FCVal> *pNode = m_oldLinkHead;
+            m_oldLinkHead = m_oldLinkHead->m_pNextNode;
+            if (m_oldLinkHead != NULL) {
+                m_oldLinkHead->m_pFrontNode = NULL;
+            }
+            m_bucketMap.erase(pNode->m_key);
+            if (m_pBelong->m_pOldCallBack) {
+                m_pBelong->m_pOldCallBack(pNode->m_key, pNode->m_val,
+                                          m_pBelong->m_oldCallArgv);
+            }
+            m_pBelong->__returnNode(pNode);
+        }
+        else {
+            break;
         }
     }
     pthread_mutex_unlock(&m_bucketLock);
@@ -209,10 +288,17 @@ HashBucket<FCKey, FCVal>::__oldLinkAddNode(FCNode<FCKey, FCVal> *pNode) {
 template<class FCKey, class FCVal>
 void
 HashBucket<FCKey, FCVal>::__oldLinkDelNode(FCNode<FCKey, FCVal> *pNode) {
-    if (pNode->m_pFrontNode != NULL) {
+    if (pNode->m_pFrontNode == NULL) {
+        m_oldLinkHead = pNode->m_pNextNode;
+    }
+    else {
         pNode->m_pFrontNode->m_pNextNode = pNode->m_pNextNode;
     }
-    if (pNode->m_pNextNode != NULL) {
+
+    if (pNode->m_pNextNode == NULL) {
+        m_oldLinkTail = pNode->m_pFrontNode;
+    }
+    else {
         pNode->m_pNextNode->m_pFrontNode = pNode->m_pFrontNode;
     }
 }
@@ -232,13 +318,13 @@ FCache<FCKey, FCVal>::FCache(uint32_t hashSize, uint32_t nodeCount) {
         m_idleNodesPool.push(new FCNode<FCKey, FCVal>);
     }
 
-    init();
+    init(NULL);
 }
 
 
 template<class FCKey, class FCVal>
 FCache<FCKey, FCVal>::~FCache() {
-    init();
+    init(NULL);
 
     pthread_mutex_destroy(&m_idleNodesPoolLock);
     pthread_rwlock_destroy(&m_currTmLock);
@@ -257,12 +343,17 @@ FCache<FCKey, FCVal>::~FCache() {
 
 template<class FCKey, class FCVal>
 int
-FCache<FCKey, FCVal>::init() {
+FCache<FCKey, FCVal>::init(void (*pOldCallBack)(FCKey key, FCVal val, void *argv),
+                           void *oldCallArgv)
+{
     // 清空索引
     for (uint32_t i = 0; i < m_hashSize; i++) {
         m_hashMap[i].init(this);
     }
-
+    m_pOldCallBack = pOldCallBack;
+    m_oldCallArgv = oldCallArgv;
+    m_oldSec = 5;
+    time(&m_currTm);
     return 0;
 }
 
@@ -277,10 +368,47 @@ FCache<FCKey, FCVal>::start() {
 
 template<class FCKey, class FCVal>
 int
+FCache<FCKey, FCVal>::stop() {
+    pthread_cancel(m_oldTid);
+    return 0;
+}
+
+
+template<class FCKey, class FCVal>
+int
+FCache<FCKey, FCVal>::get(const FCKey &key, FCVal &outVal) {
+    uint32_t hashIndex = key.getHashVal(m_hashSize);
+    HashBucket<FCKey, FCVal> &bucket = m_hashMap[hashIndex];
+    return bucket.get(key, outVal);
+}
+
+
+template<class FCKey, class FCVal>
+int
 FCache<FCKey, FCVal>::insert(const FCKey &key, const FCVal &val) {
     uint32_t hashIndex = key.getHashVal(m_hashSize);
     HashBucket<FCKey, FCVal> &bucket = m_hashMap[hashIndex];
     return bucket.insert(key, val);
+}
+
+
+template<class FCKey, class FCVal>
+int
+FCache<FCKey, FCVal>::del(const FCKey &key) {
+    uint32_t hashIndex = key.getHashVal(m_hashSize);
+    HashBucket<FCKey, FCVal> &bucket = m_hashMap[hashIndex];
+    return bucket.del(key);
+}
+
+
+template<class FCKey, class FCVal>
+uint32_t
+FCache<FCKey, FCVal>::size() {
+    uint32_t totalSize = 0;
+    for (uint32_t i = 0; i < m_hashSize; i++) {
+        totalSize += m_hashMap[i].size();
+    }
+    return totalSize;
 }
 
 
